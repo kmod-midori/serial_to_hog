@@ -12,3 +12,5 @@ int register_connection(struct bt_conn *conn);
 control_block_t *get_control_block(struct bt_conn *conn);
 control_block_t *get_control_block_by_index(int index);
 int unregister_connection(struct bt_conn *conn);
+int count_connected_devices(void);
+bool is_control_blocks_full(void);

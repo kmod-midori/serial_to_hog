@@ -21,11 +21,14 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/drivers/gpio.h>
 
 #include "adv.h"
 #include "hog.h"
+#include "pair.h"
 #include "registry.h"
 #include "zephyr/bluetooth/addr.h"
+#include "zephyr/bluetooth/gap.h"
 #include "zephyr/sys/ring_buffer.h"
 
 LOG_MODULE_REGISTER(main);
@@ -34,11 +37,19 @@ const struct device *const uart_dev = DEVICE_DT_GET(DT_CHOSEN(serial_to_hogp_ser
 RING_BUF_DECLARE(uart_rx_buf, 2048);
 RING_BUF_DECLARE(uart_tx_buf, 2048);
 
-struct k_work start_adv_worker;
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_CHOSEN(serial_to_hogp_status_led), gpios);
+
 static void start_adv_handler(struct k_work *work) {
   stop_adv();
-  start_adv();
+  if (is_control_blocks_full()) {
+    return;
+  }
+  start_adv(count_connected_devices() == 0
+                ? BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN, BT_GAP_ADV_FAST_INT_MIN_1, BT_GAP_ADV_FAST_INT_MAX_1, NULL)
+                : BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN, BT_GAP_ADV_SLOW_INT_MIN, BT_GAP_ADV_SLOW_INT_MAX, NULL));
+  gpio_pin_set_dt(&led, count_connected_devices() > 0 ? 1 : 0);
 }
+K_WORK_DEFINE(start_adv_work, start_adv_handler);
 
 typedef struct {
   bool connected;
@@ -73,6 +84,7 @@ static void send_connections_handler(struct k_work *work) {
 
   LOG_INF("Sending %d connected devices", count);
 }
+K_WORK_DEFINE(send_connections_work, send_connections_handler);
 
 static void connected(struct bt_conn *conn, uint8_t err) {
   char addr[BT_ADDR_LE_STR_LEN];
@@ -98,8 +110,8 @@ static void connected(struct bt_conn *conn, uint8_t err) {
     return;
   }
 
-  k_work_submit(&start_adv_worker);
-  k_work_submit(&send_connections_worker);
+  k_work_submit(&start_adv_work);
+  k_work_submit(&send_connections_work);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
@@ -110,8 +122,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
 
   unregister_connection(conn);
 
-  k_work_submit(&start_adv_worker);
-  k_work_submit(&send_connections_worker);
+  k_work_submit(&start_adv_work);
+  k_work_submit(&send_connections_work);
 }
 
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
@@ -144,8 +156,6 @@ static void bt_ready(int err) {
     return;
   }
 
-  k_work_init(&start_adv_worker, start_adv_handler);
-
   LOG_INF("Bluetooth ready");
 
   hog_init();
@@ -154,33 +164,8 @@ static void bt_ready(int err) {
     settings_load();
   }
 
-  k_work_submit(&start_adv_worker);
+  k_work_submit(&start_adv_work);
 }
-
-static void bt_auth_cancel(struct bt_conn *conn) {
-  char addr[BT_ADDR_LE_STR_LEN];
-  bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-  LOG_INF("Pairing cancelled: %s", addr);
-}
-
-static void bt_pairing_confirm(struct bt_conn *conn) {
-  char addr[BT_ADDR_LE_STR_LEN];
-  bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-  LOG_INF("Pairing confirm: %s", addr);
-
-  int err = bt_conn_auth_pairing_confirm(conn);
-  if (err) {
-    LOG_ERR("Pairing confirm failed (err %d)", err);
-    return;
-  }
-
-  LOG_INF("Pairing confirm success: %s", addr);
-}
-
-static struct bt_conn_auth_cb auth_cb_display = {
-    .pairing_confirm = bt_pairing_confirm,
-    .cancel = bt_auth_cancel,
-};
 
 typedef union {
   struct {
@@ -244,8 +229,8 @@ static void uart_interrupt_handler(const struct device *dev, void *user_data) {
           // Drop the header
           ring_buf_get(&uart_rx_buf, NULL, sizeof(command_header_t));
 
-          // Send the connected devices
-          k_work_submit(&send_connections_worker);
+          // Send connected devices
+          k_work_submit(&send_connections_work);
           break;
         default:
           // Drop the header
@@ -287,13 +272,23 @@ int main(void) {
     return 0;
   }
 
+  if (!gpio_is_ready_dt(&led)) {
+    LOG_ERR("LED device not ready");
+    return 0;
+  }
+
+  err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+  if (err) {
+    LOG_ERR("Failed to configure LED pin (err %d)", err);
+    return 0;
+  }
+
   err = uart_irq_callback_set(uart_dev, uart_interrupt_handler);
   if (err) {
     LOG_ERR("Failed to set UART IRQ (err %d)", err);
     return 0;
   }
   uart_irq_rx_enable(uart_dev);
-  k_work_init(&send_connections_worker, send_connections_handler);
 
   err = bt_enable(bt_ready);
   if (err) {
@@ -301,7 +296,7 @@ int main(void) {
     return 0;
   }
 
-  err = bt_conn_auth_cb_register(&auth_cb_display);
+  err = register_auth_callbacks();
   if (err) {
     LOG_ERR("Failed to register auth callbacks (err %d)", err);
     return 0;

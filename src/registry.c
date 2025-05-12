@@ -62,3 +62,22 @@ int unregister_connection(struct bt_conn *conn) {
   }
   return -1; // Connection not found
 }
+
+int count_connected_devices(void) {
+  int count = 0;
+  for (int i = 0; i < CONFIG_BT_MAX_CONN; i++) {
+    if (control_blocks[i].conn != NULL) {
+      count++;
+    }
+  }
+  return count;
+}
+
+bool is_control_blocks_full(void) {
+  for (int i = 0; i < CONFIG_BT_MAX_CONN; i++) {
+    if (control_blocks[i].conn == NULL) {
+      return false;
+    }
+  }
+  return true;
+}
