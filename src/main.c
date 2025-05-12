@@ -43,9 +43,8 @@ static void start_adv_handler(struct k_work *work) {
 typedef struct {
   bool connected;
   uint16_t conn_id;
-  bt_addr_t addr;
+  uint8_t addr[6];
 } __attribute__((packed)) uart_connected_device_t;
-struct k_work send_connections_worker;
 static void send_connections_handler(struct k_work *work) {
   uart_connected_device_t devices[CONFIG_BT_MAX_CONN];
   memset(devices, 0, sizeof(devices));
@@ -57,7 +56,12 @@ static void send_connections_handler(struct k_work *work) {
     if (cb) {
       devices[i].connected = true;
       devices[i].conn_id = i;
-      bt_addr_copy(&devices[i].addr, &cb->addr.a);
+      devices[i].addr[0] = cb->addr.a.val[5];
+      devices[i].addr[1] = cb->addr.a.val[4];
+      devices[i].addr[2] = cb->addr.a.val[3];
+      devices[i].addr[3] = cb->addr.a.val[2];
+      devices[i].addr[4] = cb->addr.a.val[1];
+      devices[i].addr[5] = cb->addr.a.val[0];
       count++;
     }
   }
